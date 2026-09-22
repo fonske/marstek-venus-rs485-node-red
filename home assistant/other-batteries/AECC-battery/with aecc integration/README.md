@@ -6,7 +6,7 @@ Exposes the exact `marstek_m1_*` entities expected by [Home Battery Control](htt
 
 No cloud dependency: all reads and writes go to the battery on your LAN.
 
-Package file: [`aecc_battery_to_m1.yaml`](aecc_battery_to_m1.yaml) — version **1.0** (see the version history at the top of the file).
+Package file: [`aecc_battery_to_m1.yaml`](aecc_battery_to_m1.yaml) — version **1.1** (see the version history at the top of the file).
 
 ## Supported devices
 
@@ -71,7 +71,7 @@ Optional settings live in the automation's **Settings** block:
 | Forcible `charge` + charge power `P` | `number.aecc_battery_power_setpoint` = `+P` |
 | Forcible `discharge` + discharge power `P` | `number.aecc_battery_power_setpoint` = `−P` |
 | Forcible `stop` | `number.aecc_battery_power_setpoint` = `0` |
-| `select.marstek_m1_user_work_mode` | Linked directly to `select.aecc_battery_work_mode` (`manual` ↔ *Custom / Manual*, `anti-feed` / `ai` ↔ *Self-Consumption (AI)*) |
+| `select.marstek_m1_user_work_mode` | Reads `select.aecc_battery_work_mode` (`manual` ↔ *Custom / Manual*, `anti-feed` / `ai` ↔ *Self-Consumption (AI)*). `anti-feed` / `ai` are always forwarded; `manual` is forwarded **only while RS485 control mode is `enable`** (see Troubleshooting). |
 
 HBC writes its decisions to the fake Marstek entities, which store them in helpers. The automation (mode `restart`, 500 ms coalesce for rapid HBC updates) reads the helpers and writes **one signed setpoint**: positive = charge, negative = discharge, 0 = idle. Writing the setpoint automatically puts the Voltdeer in *Custom / Manual* mode. Setpoints are clamped to the max charge / discharge power configured in the AECC integration and only written when they differ from the current value.
 
@@ -87,9 +87,9 @@ HBC writes its decisions to the fake Marstek entities, which store them in helpe
 
 ## Update rate limit (P1 refresh ≥ 5 s)
 
-> **Warning:** the AECC battery hardware cannot process setpoint changes faster than about **once every 5 seconds**. Set the **P1 meter refresh / update interval to 5 s or slower**. With a faster P1 interval (e.g. 1 s) HBC's PID sends new setpoints faster than the battery can apply them; the battery lags or ignores writes, the PID loop overshoots and the battery oscillates between charge and discharge.
+> **Warning:** the AECC battery hardware cannot process setpoint changes faster than about **once every 5 seconds**. Set the **P1 meter refresh / update interval in HBC to 5 s or slower**. With a faster P1 interval (e.g. 1 s) HBC's self-consumption PID sends new setpoints faster than the battery can apply them; the battery lags or ignores writes, the PID loop overshoots and the battery oscillates between charge and discharge.
 
-- Configure the P1 update interval to **5 s** (or more). Normally this is home assistant default.
+- Configure the P1 update interval on the HBC dashboard / in the HBC config (`house_battery_control_config.yaml`) to **5 s** (or more).
 - Expect the battery to react roughly 5 s after each HBC decision; this is normal for this hardware.
 - The automation in this package already coalesces rapid HBC updates (500 ms, mode `restart`) and skips writes when the setpoint is unchanged, but it cannot make the battery respond faster than the hardware allows.
 
@@ -107,6 +107,7 @@ HBC writes its decisions to the fake Marstek entities, which store them in helpe
 - **Setpoint is written but the battery does not follow:** check the *On Grid Output* cap in the AECC app and the max charge / discharge power in the integration.
 - **Battery oscillates between charge and discharge in Self-consumption:** the P1 refresh interval in HBC is probably faster than 5 s. Raise it to **5 s or more** (see [Update rate limit](#update-rate-limit-p1-refresh--5-s)) and, if needed, pick a slower PID preset.
 - **Self-consumption enables control but never charges / discharges:** check the HBC PID gains (`Kp` / `Ki` / `Kd`). If all are `0`, HBC keeps forcible mode at `stop` @ `0 W`. Pick a PID preset on the HBC dashboard.
+- **Battery keeps falling back from Self-Consumption (AI) to Custom / Manual, logbook says "triggered by Supervisor":** the HBC master-switch flow in Node-RED (which reaches HA through the Supervisor proxy, hence the attribution) re-applies user work mode `manual` **every 5 minutes** while the HBC master mode is **Manual control**. Since v1.1 the package ignores `manual` unless HBC has control (RS485 control mode `enable`), so the battery keeps its own mode. If you want the battery to run its own AI, use HBC master mode **Marstek control**, which never writes the work mode. In **Full control** the battery is always in Custom / Manual because every setpoint write puts it there — that is by design.
 - **Battery stays in Custom / Manual after HBC releases control:** that is by design (setpoint 0). Set `RELEASE_TO_SELF_CONSUMPTION: true` in the automation to hand it back to *Self-Consumption (AI)*.
 - **Enable notifications** (`NOTIFY_ENABLED: true`) to see each HBC decision and the resulting setpoint.
 

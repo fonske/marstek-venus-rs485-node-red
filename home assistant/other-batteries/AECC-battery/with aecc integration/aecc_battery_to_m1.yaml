@@ -1,9 +1,15 @@
 # =============================================================================
 # AECC Battery (Voltdeer SR5000 Pro) to Marstek M1 package for HBC
 # File   : aecc_battery_to_m1.yaml
-# Version: 1.0
+# Version: 1.1
 # =============================================================================
 # VERSION HISTORY
+#   1.1  2026-09-22  Fix: battery was reset from Self-Consumption (AI) to Custom / Manual
+#                    every 5 minutes (logbook: "triggered by Supervisor"). Cause: the HBC
+#                    master switch flow in Node-RED re-applies user work mode 'manual' every
+#                    300 s while the master mode is "Manual control", and select #22 forwarded
+#                    it directly to the battery. Now 'manual' is only forwarded when RS485
+#                    control mode is 'enable'; writes are skipped when the mode is already set.
 #   1.0  2026-09-22  Initial release.
 #                    - Merged aecc_battery_to_m1_marstek.yaml (template entities,
 #                      helpers, utility meters), automation_hbc_for_aecc_battery.yaml
@@ -354,10 +360,18 @@ template:
             data:
               option: "{{ option }}"
 
-      # 22. User Work Mode: linked DIRECTLY to the Voltdeer Work Mode select.
+      # 22. User Work Mode: reads the Voltdeer Work Mode select.
       #   Marstek 'manual'            <-> Voltdeer 'Custom / Manual'
       #   Marstek 'anti-feed' / 'ai'  <-> Voltdeer 'Self-Consumption (AI)'
       # Note: writing the Power Setpoint automatically switches the Voltdeer to 'Custom / Manual'.
+      #
+      # IMPORTANT: the HBC master switch flow (Node-RED, via the Supervisor proxy) writes
+      # 'manual' to this select EVERY 5 MINUTES while the HBC master mode is "Manual control".
+      # Forwarding that blindly would kick the battery out of Self-Consumption (AI) every 5 min.
+      # For a Voltdeer "Manual control" means "the user steers the battery via the AECC app",
+      # so 'manual' is only forwarded when HBC actually has control (RS485 control mode 'enable');
+      # otherwise it is ignored and the battery keeps whatever mode it is in.
+      # 'anti-feed' / 'ai' are always forwarded as Self-Consumption (AI).
       - name: "Marstek M1 User Work Mode (for AECC Battery)"
         default_entity_id: select.marstek_m1_user_work_mode
         unique_id: marstek_m1_user_work_mode_aecc_battery
@@ -370,12 +384,27 @@ template:
           {% else %} manual
           {% endif %}
         select_option:
-          - action: select.select_option
-            target:
-              entity_id: select.aecc_battery_work_mode
-            data:
-              option: >
-                {{ 'Custom / Manual' if option == 'manual' else 'Self-Consumption (AI)' }}
+          - choose:
+              - conditions: >
+                  {{ option == 'manual'
+                     and states('input_select.marstek_m1_aecc_battery_helper_rs485_control_mode') == 'enable'
+                     and states('select.aecc_battery_work_mode') != 'Custom / Manual' }}
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.aecc_battery_work_mode
+                    data:
+                      option: "Custom / Manual"
+              - conditions: >
+                  {{ option in ['anti-feed', 'ai']
+                     and states('select.aecc_battery_work_mode') != 'Self-Consumption (AI)' }}
+                sequence:
+                  - action: select.select_option
+                    target:
+                      entity_id: select.aecc_battery_work_mode
+                    data:
+                      option: "Self-Consumption (AI)"
+            # default: 'manual' while HBC has no control, or mode already set -> do nothing
 
       # 23. Forcible Charge/Discharge: stored in a helper, applied by the automation
       # together with the Forcible Charge/Discharge Power as one signed Power Setpoint.
