@@ -1,0 +1,1148 @@
+# =======================================================================================
+# AECC Battery (Voltdeer SR5000 Pro, Sunpura, Lunergy, AEG Solarcube, ...) as Marstek M1 for HBC
+# Direct JSON + Modbus over TCP (port 8080) - NO integration needed as the battery accepts 1 master.
+# Version: 1.0
+# =======================================================================================
+#
+#   >>>>>>  SET YOUR BATTERY IP (and port) HERE  <<<<<<
+input_text:
+  aecc_battery_host:
+    name: "AECC battery IP address"
+    icon: mdi:ip-network
+    initial: "192.168.1.169"          # <-- battery IP (give it a fixed IP in your router)
+    max: 64
+  aecc_battery_port:
+    name: "AECC battery TCP port"
+    icon: mdi:ethernet
+    initial: "8080"                  # <-- AECC default port
+    max: 5
+
+#   >>>>>>  SET YOUR POWER LIMITS HERE  <<<<<<
+#   Above 800 W register 3039 is raised automatically. For DISCHARGE above 800 W you must also raise
+#   "On Grid Output" in the AECC app (Operating Mode Settings), and only on a dedicated circuit.
+input_number:
+  aecc_battery_max_charge_power:
+    name: "AECC max charge power"
+    icon: mdi:battery-arrow-up
+    min: 100
+    max: 2400
+    step: 100
+    initial: 2400                    # <-- max CHARGE power (W, 100-2400)
+    unit_of_measurement: "W"
+  aecc_battery_max_discharge_power:
+    name: "AECC max discharge power"
+    icon: mdi:battery-arrow-down
+    min: 100
+    max: 2400
+    step: 100
+    initial: 800                     # <-- max DISCHARGE power (W, 100-2400)
+    unit_of_measurement: "W"
+
+  # ---- other settings (defaults; also editable in the UI, reset to these initial values on restart) ----
+  marstek_m1_forcible_charge_power_helper:
+    name: "Marstek M1 Forcible Charge Power helper"
+    icon: mdi:database-import
+    min: 0
+    max: 2400
+    step: 1
+    unit_of_measurement: "W"
+  marstek_m1_forcible_discharge_power_helper:
+    name: "Marstek M1 Forcible Discharge Power helper"
+    icon: mdi:database-import
+    min: 0
+    max: 2400
+    step: 1
+    unit_of_measurement: "W"
+  aecc_battery_charge_stop_soc:
+    name: "AECC charge stop SOC (register 3024)"
+    icon: mdi:battery-charging-high
+    min: 50
+    max: 100
+    step: 1
+    initial: 98
+    unit_of_measurement: "%"
+  aecc_battery_discharge_stop_soc:
+    name: "AECC discharge stop SOC (register 3023)"
+    icon: mdi:battery-low
+    min: 5
+    max: 50
+    step: 1
+    initial: 10
+    unit_of_measurement: "%"
+  aecc_battery_capacity_kwh:
+    name: "AECC battery capacity"
+    icon: mdi:battery-high
+    min: 0.5
+    max: 50
+    step: 0.01
+    initial: 5.12
+    unit_of_measurement: "kWh"
+  aecc_battery_nominal_voltage:
+    name: "AECC nominal battery voltage"
+    icon: mdi:flash
+    min: 0
+    max: 600
+    step: 0.1
+    initial: 51.2
+    unit_of_measurement: "V"
+  aecc_battery_slot_field6:
+    name: "AECC slot field 6 (5 = SR5000/most, 4 = no storage list, 0 = AEG)"
+    icon: mdi:code-brackets
+    min: 0
+    max: 9
+    step: 1
+    initial: 5
+# NOTE: 'initial' is applied on every HA restart, so change the values HERE, not in the UI.
+#
+# =======================================================================================
+# HBC is a Home Battery Control package for Home Assistant and Node-RED.
+#   Docs   : https://docs.homebatterycontrol.com/
+#   GitHub : https://github.com/gitcodebob/marstek-venus-rs485-node-red
+# This single file provides the complete Marstek M1 entity contract that HBC expects
+# (sensor./number./select.marstek_m1_*) AND the same entities the aecc-battery-local
+# integration offers (https://github.com/StekkerDeal/aecc-battery-local), using the same
+# protocols as that integration. Structure follows the Anker Solarbank example in the HBC
+# repo (other-batteries/Anker-Solarbank), with JSON/Modbus-TCP instead of Anker Modbus.
+#
+# INSTALLATION
+# 1. Set the IP above.
+# 2. Copy this file to the HA packages folder (next to house_battery_control.yaml).
+# 3. Restart Home Assistant. Check that sensor.marstek_m1_battery_state_of_charge shows a value.
+# 4. In HBC: 1 battery, Full Control -> the automation below writes the battery.
+# 5. Set the power limits at the top (defaults: charge 2400 W, discharge 800 W). Above 800 W register 3039 is
+#    raised automatically, but the AECC app "On Grid Output" cap (default 800 W, Operating Mode
+#    Settings) is NOT reachable locally and must be raised in the app for discharge > 800 W.
+# Do NOT run the aecc-battery-local integration against the same battery at the same time.
+#
+# PROTOCOL 1: JSON (one JSON object + newline per request, UTF-8) - control + live power values
+#   {"Get":"EnergyParameter","SerialNumber":1,"CommandSource":"HA"}
+#      -> {"SSumInfoList":{"AverageBatteryAverageSOC":..,"TotalACChargePower":..,"TotalBatteryOutputPower":..,
+#                          "TotalPVPower":..,"TotalPVChargePower":..,"MeterTotalActivePower":..,"TotalBackUpPower":..},
+#          "Storage_list":[{"BatterySoc":..,"AcChargingPower":..(x0.1 W),"BatteryDischargingPower":..(x0.1 W),
+#                           "PvChargingPower":..(x0.1 W),"Pv1Power":..,"Pv2Power":..,"OffGridLoadPower":..}], ...}
+#   {"Get":"Energycontrolparameters","SerialNumber":2,"CommandSource":"HA","RegControlAddr":[3000,3003,3020]}
+#      -> {"ControlInfo":{"3000":"1","3003":"...","3020":"6"}}
+#   {"Set":"Energycontrolparameters","SerialNumber":3,"CommandSource":"HA","SetControlInfo":{"3000":"1",...}}
+#   {"Get":"DeviceManagement","SerialNumber":4,"CommandSource":"HA","RegDeviceManagementAddr":[2,8,9,20,21,76]}
+#      -> {"DeviceManagementInfo":{"8":"<serial>","20":"<model>","21":"<firmware>","76":"<wifi dBm>"}}
+#
+# JSON REGISTER MAP (logical registers 3000+; NOT Modbus)
+#   3000 EMS enable "1" | 3020 schedule mode "6"=custom "3"=AI | 3021/3022 AI charge/discharge "0"/"1"
+#   3030 custom mode "0"/"1" | 3023 min SOC (discharge stop 5-50) | 3024 max SOC (charge stop 50-100)
+#   3039 max feed power W (default 800, max 2400)
+#   3003 time slot 1 (CSV): "timeSwitch,HH:MM,HH:MM,powerW,0,6,f6,0,0,chargeSOC,dischargeSOC"
+#        powerW NEGATIVE = charge, POSITIVE = discharge; idle = "0,00:00,00:00,0,0,0,0,0,0,98,10"
+#        f6 = 5 for units with a Storage_list (SR5000 etc.), 4 otherwise, 0 on AEG Solarcube
+#   Charge X W    : 3000=1,3020=6,3021=0,3022=0,3030=1,3003="1,00:00,23:59,-X,0,6,5,0,0,<maxsoc>,<minsoc>"
+#   Discharge X W : same with +X
+#   Idle/stop     : same with 3003="0,00:00,00:00,0,0,0,0,0,0,<maxsoc>,<minsoc>"
+#   Self-Cons.(AI): 3000=1,3020=3,3021=1,3022=1,3030=0,3003="0,00:00,00:00,0,0,0,0,0,0,100,10"
+#
+# PROTOCOL 2: MODBUS TCP (same socket/port 8080, unit id 1, function 03 read holding, READ-ONLY)
+#   Lifetime counters and temperatures. u32 = LOW word first. Not every brand answers; if not,
+#   sensor.aecc_battery_modbus stays unavailable and the rest keeps working.
+#   30073-30075  Temperature 1..3        i16 x0.1 degC
+#   52050/52051  Lifetime energy charged    u32 x0.1 kWh   (DC side, behind the inverter)
+#   52052/52053  Lifetime energy discharged u32 x0.1 kWh
+#   52080/52081  Lifetime energy to grid    u32 x0.1 kWh
+#   65033        Available charge power  i16 W  | 65035 nominal power W | 65037 nominal battery power W
+#   65039        Device status u16 (0 normal, 1 fault) | 65051/65052 alarm flags u32 (bits unknown)
+#
+# Marstek sign conventions used by HBC:
+#   sensor.marstek_m1_battery_power : + charging, - discharging
+#   sensor.marstek_m1_ac_power      : + discharging (to house), - charging
+# =======================================================================================
+
+# ---------------------------------------------------------------------------------------
+# A. TCP COMMANDS (inline python, host/port come from the helpers above)
+# ---------------------------------------------------------------------------------------
+shell_command:
+  # JSON: EnergyParameter -> live values
+  aecc_get_energy: |
+    python3 -c "
+    import socket,json,sys
+    H=sys.argv[1];P=int(sys.argv[2])
+    q={'Get':'EnergyParameter','SerialNumber':1,'CommandSource':'HA'}
+    s=socket.create_connection((H,P),8);s.settimeout(8)
+    s.sendall((json.dumps(q)+chr(10)).encode())
+    b=b''
+    while True:
+      c=s.recv(4096)
+      if not c: break
+      b+=c
+      try: json.loads(b);break
+      except ValueError: pass
+    s.close()
+    d=json.loads(b)
+    t=d.get('SSumInfoList') or {}
+    u=d.get('Storage_list') or []
+    def f(k,sc=1.0):
+      v=t.get(k)
+      return float(v)*sc if v not in (None,'') else None
+    def us(k,sc=0.1):
+      return sum(float(x.get(k) or 0) for x in u)*sc if u else None
+    soc=f('AverageBatteryAverageSOC')
+    if soc is None and u: soc=sum(float(x.get('BatterySoc') or 0) for x in u)/len(u)
+    ac=f('TotalACChargePower');ac=us('AcChargingPower') if ac is None else ac
+    pvc=f('TotalPVChargePower');pvc=us('PvChargingPower') if pvc is None else pvc
+    dis=f('TotalBatteryOutputPower');dis=us('BatteryDischargingPower') if dis is None else dis
+    pv=f('TotalPVPower');grid=f('MeterTotalActivePower');bk=f('TotalBackUpPower',10.0)
+    bk=us('OffGridLoadPower',1.0) if bk is None else bk
+    pv1=us('Pv1Power',1.0);pv2=us('Pv2Power',1.0)
+    o={'soc':round(soc or 0),'ac_charge_w':round(ac or 0),'pv_charge_w':round(pvc or 0),'discharge_w':round(dis or 0),
+       'battery_power_w':round((ac or 0)+(pvc or 0)-(dis or 0)),'pv_w':round(pv or 0),'grid_w':round(grid or 0),
+       'backup_w':round(bk or 0),'pv1_w':round(pv1 or 0),'pv2_w':round(pv2 or 0),'storage_units':len(u)}
+    print(json.dumps(o))
+    " '{{ states("input_text.aecc_battery_host") }}' '{{ states("input_text.aecc_battery_port") }}'
+
+  # JSON: read control registers -> {"3000":"1","3003":"...",...}
+  aecc_get_registers: |
+    python3 -c "
+    import socket,json,sys
+    H=sys.argv[1];P=int(sys.argv[2])
+    q={'Get':'Energycontrolparameters','SerialNumber':2,'CommandSource':'HA','RegControlAddr':[3000,3003,3020,3021,3022,3023,3024,3030,3039]}
+    s=socket.create_connection((H,P),8);s.settimeout(8)
+    s.sendall((json.dumps(q)+chr(10)).encode())
+    b=b''
+    while True:
+      c=s.recv(4096)
+      if not c: break
+      b+=c
+      try: json.loads(b);break
+      except ValueError: pass
+    s.close()
+    d=json.loads(b)
+    p=d.get('ControlInfo') or d.get('GetParameters') or d.get('Parameters') or {}
+    print(json.dumps({str(k):str(v) for k,v in p.items()}))
+    " '{{ states("input_text.aecc_battery_host") }}' '{{ states("input_text.aecc_battery_port") }}'
+
+  # JSON: write registers. Pass a JSON dict in 'registers', e.g. {"3023":"10"}
+  aecc_set_registers: |
+    python3 -c "
+    import socket,json,sys
+    H=sys.argv[1];P=int(sys.argv[2])
+    r=json.loads(sys.argv[3])
+    si={str(k):str(v) for k,v in r.items()}
+    q={'Set':'Energycontrolparameters','SerialNumber':3,'CommandSource':'HA','SetControlInfo':si}
+    s=socket.create_connection((H,P),8);s.settimeout(8)
+    s.sendall((json.dumps(q)+chr(10)).encode())
+    b=b''
+    while True:
+      c=s.recv(4096)
+      if not c: break
+      b+=c
+      try: json.loads(b);break
+      except ValueError: pass
+    s.close()
+    print(b.decode(errors='replace'))
+    " '{{ states("input_text.aecc_battery_host") }}' '{{ states("input_text.aecc_battery_port") }}' '{{ registers }}'
+
+  # JSON: DeviceManagement -> serial, model, firmware, wifi
+  aecc_get_device: |
+    python3 -c "
+    import socket,json,sys
+    H=sys.argv[1];P=int(sys.argv[2])
+    q={'Get':'DeviceManagement','SerialNumber':4,'CommandSource':'HA','RegDeviceManagementAddr':[2,8,9,20,21,76]}
+    s=socket.create_connection((H,P),8);s.settimeout(8)
+    s.sendall((json.dumps(q)+chr(10)).encode())
+    b=b''
+    while True:
+      c=s.recv(4096)
+      if not c: break
+      b+=c
+      try: json.loads(b);break
+      except ValueError: pass
+    s.close()
+    d=json.loads(b)
+    p=d.get('DeviceManagementInfo') or d.get('ControlInfo') or d.get('Parameters') or d.get('GetParameters') or {}
+    g=lambda k: p.get(k) if p.get(k) is not None else p.get(int(k))
+    print(json.dumps({'serial':g('8'),'model':g('20'),'firmware':g('21'),'wifi_rssi':g('76'),'reg2':g('2'),'reg9':g('9')}))
+    " '{{ states("input_text.aecc_battery_host") }}' '{{ states("input_text.aecc_battery_port") }}'
+
+  # MODBUS TCP (FC03, unit 1) on the same port: lifetime counters, temperatures, status
+  aecc_get_modbus: |
+    python3 -c "
+    import socket,struct,json,sys
+    H=sys.argv[1];P=int(sys.argv[2])
+    blocks=[(65030,23),(30073,3),(52050,4),(52080,2)]
+    s=socket.create_connection((H,P),8);s.settimeout(8)
+    def rx(n):
+      b=b''
+      while len(b)<n:
+        c=s.recv(n-len(b))
+        if not c: raise RuntimeError('socket closed')
+        b+=c
+      return b
+    regs={};tid=0
+    for start,count in blocks:
+      tid+=1
+      s.sendall(struct.pack('>HHHBBHH',tid,0,6,1,3,start,count))
+      rtid,proto,ln,unit=struct.unpack('>HHHB',rx(7))
+      pdu=rx(ln-1)
+      if pdu[0]&0x80: raise RuntimeError('modbus exception %d at %d'%(pdu[1],start))
+      words=struct.unpack('>%dH'%count,pdu[2:2+2*count])
+      for i,w in enumerate(words): regs[start+i]=w
+    s.close()
+    def i16(a):
+      v=regs[a];return v-65536 if v>32767 else v
+    def u32(a): return regs[a]|(regs[a+1]<<16)
+    o={'temperature_1':round(i16(30073)*0.1,1),'temperature_2':round(i16(30074)*0.1,1),'temperature_3':round(i16(30075)*0.1,1),
+       'energy_charged_kwh':round(u32(52050)*0.1,1),'energy_discharged_kwh':round(u32(52052)*0.1,1),'energy_to_grid_kwh':round(u32(52080)*0.1,1),
+       'available_charge_power_w':i16(65033),'nominal_power_w':i16(65035),'nominal_battery_power_w':i16(65037),
+       'device_status':regs[65039],'alarm_flags':u32(65051)}
+    print(json.dumps(o))
+    " '{{ states("input_text.aecc_battery_host") }}' '{{ states("input_text.aecc_battery_port") }}'
+
+# ---------------------------------------------------------------------------------------
+# B. HELPERS storing HBC's decisions
+# ---------------------------------------------------------------------------------------
+input_select:
+  marstek_m1_rs485_control_mode_helper:
+    name: "Marstek M1 RS485 Control Mode helper"
+    icon: mdi:database-import
+    options: ["disable", "enable"]
+    initial: disable
+  marstek_m1_forcible_charge_discharge_helper:
+    name: "Marstek M1 Forcible Charge/Discharge helper"
+    icon: mdi:database-import
+    options: ["stop", "charge", "discharge"]
+    initial: stop
+
+# ---------------------------------------------------------------------------------------
+# C. READ: poll the battery (trigger based template sensors calling the commands above)
+# ---------------------------------------------------------------------------------------
+template:
+  # Every 5 s: EnergyParameter -> sensor.aecc_battery_energy (state = SOC %, values as attributes)
+  - triggers:
+      - trigger: time_pattern
+        seconds: "/5"
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: shell_command.aecc_get_energy
+        response_variable: r
+        continue_on_error: true
+      - variables:
+          ok: "{{ r is defined and r.returncode == 0 }}"
+          j_new: "{{ (r.stdout | from_json) if ok else {} }}"
+          last_ok: "{{ now().isoformat() if ok else (state_attr('sensor.aecc_battery_energy','last_ok') or '') }}"
+          # keep the last good values for 120 s after a failed poll, then go unavailable
+          hold: "{{ (not ok) and (last_ok != '') and ((now() - (last_ok | as_datetime)).total_seconds() < 120) }}"
+          j: "{{ j_new if ok else (dict(states.sensor.aecc_battery_energy.attributes, soc=states('sensor.aecc_battery_energy')) if (hold and states.sensor.aecc_battery_energy is not none) else {}) }}"
+    sensor:
+      - name: "AECC Battery Energy"
+        unique_id: aecc_battery_energy
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        availability: "{{ ok or hold }}"
+        state: "{{ j.soc | default(0) }}"
+        attributes:
+          ac_charge_w: "{{ j.ac_charge_w | default(0) }}"
+          pv_charge_w: "{{ j.pv_charge_w | default(0) }}"
+          discharge_w: "{{ j.discharge_w | default(0) }}"
+          battery_power_w: "{{ j.battery_power_w | default(0) }}"
+          pv_w: "{{ j.pv_w | default(0) }}"
+          grid_w: "{{ j.grid_w | default(0) }}"
+          backup_w: "{{ j.backup_w | default(0) }}"
+          pv1_w: "{{ j.pv1_w | default(0) }}"
+          pv2_w: "{{ j.pv2_w | default(0) }}"
+          storage_units: "{{ j.storage_units | default(0) }}"
+          link_ok: "{{ ok }}"
+          last_ok: "{{ last_ok }}"
+          last_error: "{{ '' if ok else (r.stderr if r is defined else 'command failed') }}"
+
+  # Every 60 s + right after every write: control registers -> sensor.aecc_battery_control_registers
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/1"
+      - trigger: event
+        event_type: aecc_battery_refresh_registers
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: shell_command.aecc_get_registers
+        response_variable: r
+        continue_on_error: true
+      - variables:
+          ok: "{{ r is defined and r.returncode == 0 }}"
+          j_new: "{{ (r.stdout | from_json) if ok else {} }}"
+          last_ok: "{{ now().isoformat() if ok else (state_attr('sensor.aecc_battery_control_registers','last_ok') or '') }}"
+          # keep the last good values for 300 s after a failed poll, then go unavailable
+          hold: "{{ (not ok) and (last_ok != '') and ((now() - (last_ok | as_datetime)).total_seconds() < 300) }}"
+          j: "{{ j_new if ok else (dict(states.sensor.aecc_battery_control_registers.attributes) if (hold and states.sensor.aecc_battery_control_registers is not none) else {}) }}"
+          raw_regs: "{{ j_new if ok else (states.sensor.aecc_battery_control_registers.attributes.raw if (hold and states.sensor.aecc_battery_control_registers is not none) else {}) }}"
+          j: "{{ raw_regs }}"
+          slot: "{{ (j['3003'] | default('')).split(',') }}"
+          setpoint: >-
+            {% if slot | length >= 4 and slot[0] == '1' %}{{ 0 - (slot[3] | int(0)) }}{% else %}0{% endif %}
+    sensor:
+      - name: "AECC Battery Control Registers"
+        unique_id: aecc_battery_control_registers
+        icon: mdi:code-json
+        availability: "{{ ok or hold }}"
+        state: "{{ j['3003'] | default('n/a') }}"
+        attributes:
+          raw: "{{ j }}"
+          link_ok: "{{ ok }}"
+          last_ok: "{{ last_ok }}"
+          ems_enable_3000: "{{ j['3000'] | default('') }}"
+          slot1_3003: "{{ j['3003'] | default('') }}"
+          schedule_mode_3020: "{{ j['3020'] | default('') }}"
+          ai_charge_3021: "{{ j['3021'] | default('') }}"
+          ai_discharge_3022: "{{ j['3022'] | default('') }}"
+          min_soc_3023: "{{ j['3023'] | default('') }}"
+          max_soc_3024: "{{ j['3024'] | default('') }}"
+          custom_mode_3030: "{{ j['3030'] | default('') }}"
+          max_feed_power_3039: "{{ j['3039'] | default('') }}"
+          # decoded (integration conventions): setpoint + = charge, - = discharge
+          power_setpoint_w: "{{ setpoint }}"
+          work_mode: >-
+            {{ 'Self-Consumption (AI)' if (j['3021'] | default('0')) == '1' or (j['3022'] | default('0')) == '1' else 'Custom / Manual' }}
+
+  # Every 30 s: Modbus lifetime counters / temperatures -> sensor.aecc_battery_modbus
+  - triggers:
+      - trigger: time_pattern
+        seconds: "/30"
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: shell_command.aecc_get_modbus
+        response_variable: r
+        continue_on_error: true
+      - variables:
+          ok: "{{ r is defined and r.returncode == 0 }}"
+          j_new: "{{ (r.stdout | from_json) if ok else {} }}"
+          last_ok: "{{ now().isoformat() if ok else (state_attr('sensor.aecc_battery_modbus','last_ok') or '') }}"
+          # keep the last good values for 300 s after a failed poll, then go unavailable
+          hold: "{{ (not ok) and (last_ok != '') and ((now() - (last_ok | as_datetime)).total_seconds() < 300) }}"
+          j: "{{ j_new if ok else (dict(states.sensor.aecc_battery_modbus.attributes) if (hold and states.sensor.aecc_battery_modbus is not none) else {}) }}"
+    sensor:
+      - name: "AECC Battery Modbus"
+        unique_id: aecc_battery_modbus
+        icon: mdi:database
+        availability: "{{ ok or hold }}"
+        state: "{{ 'ok' if ok else ('hold' if hold else 'unavailable') }}"
+        attributes:
+          link_ok: "{{ ok }}"
+          last_ok: "{{ last_ok }}"
+          temperature_1: "{{ j.temperature_1 | default(none) }}"
+          temperature_2: "{{ j.temperature_2 | default(none) }}"
+          temperature_3: "{{ j.temperature_3 | default(none) }}"
+          energy_charged_kwh: "{{ j.energy_charged_kwh | default(none) }}"
+          energy_discharged_kwh: "{{ j.energy_discharged_kwh | default(none) }}"
+          energy_to_grid_kwh: "{{ j.energy_to_grid_kwh | default(none) }}"
+          available_charge_power_w: "{{ j.available_charge_power_w | default(none) }}"
+          nominal_power_w: "{{ j.nominal_power_w | default(none) }}"
+          nominal_battery_power_w: "{{ j.nominal_battery_power_w | default(none) }}"
+          device_status: "{{ j.device_status | default(none) }}"
+          alarm_flags: "{{ j.alarm_flags | default(none) }}"
+          last_error: "{{ '' if ok else (r.stderr if r is defined else 'command failed') }}"
+
+  # Every 5 min: DeviceManagement -> sensor.aecc_battery_device (serial/model/firmware/wifi)
+  - triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: homeassistant
+        event: start
+    actions:
+      - action: shell_command.aecc_get_device
+        response_variable: r
+        continue_on_error: true
+      - variables:
+          ok: "{{ r is defined and r.returncode == 0 }}"
+          j_new: "{{ (r.stdout | from_json) if ok else {} }}"
+          last_ok: "{{ now().isoformat() if ok else (state_attr('sensor.aecc_battery_device','last_ok') or '') }}"
+          # keep the last good values for 86400 s after a failed poll, then go unavailable
+          hold: "{{ (not ok) and (last_ok != '') and ((now() - (last_ok | as_datetime)).total_seconds() < 86400) }}"
+          j: "{{ j_new if ok else (dict(states.sensor.aecc_battery_device.attributes) if (hold and states.sensor.aecc_battery_device is not none) else {}) }}"
+    sensor:
+      - name: "AECC Battery Device"
+        unique_id: aecc_battery_device
+        icon: mdi:information-outline
+        availability: "{{ ok or hold }}"
+        state: "{{ j.model | default('unknown') }}"
+        attributes:
+          serial: "{{ j.serial | default('') }}"
+          model: "{{ j.model | default('') }}"
+          firmware: "{{ j.firmware | default('') }}"
+          wifi_rssi: "{{ j.wifi_rssi | default('') }}"
+          reg2: "{{ j.reg2 | default('') }}"
+          reg9: "{{ j.reg9 | default('') }}"
+          link_ok: "{{ ok }}"
+          last_ok: "{{ last_ok }}"
+
+  # -------------------------------------------------------------------------------------
+  # D1. INTEGRATION-EQUIVALENT ENTITIES (same names as aecc-battery-local, prefix "AECC Battery")
+  # -------------------------------------------------------------------------------------
+  - sensor:
+      - name: "AECC Battery Battery SOC"
+        unique_id: aecc_battery_battery_soc
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        state: "{{ states('sensor.aecc_battery_energy') | float(0) | round(0) | int }}"
+
+      # signed: + charging, - discharging
+      - name: "AECC Battery Battery Power"
+        unique_id: aecc_battery_battery_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'battery_power_w') | int(0) }}"
+
+      - name: "AECC Battery Battery Status"
+        unique_id: aecc_battery_battery_status
+        icon: mdi:battery-sync
+        state: >
+          {% set c = (state_attr('sensor.aecc_battery_energy','ac_charge_w') | float(0)) + (state_attr('sensor.aecc_battery_energy','pv_charge_w') | float(0)) %}
+          {% set d = state_attr('sensor.aecc_battery_energy','discharge_w') | float(0) %}
+          {{ 'Charging' if c > 0 else ('Discharging' if d > 0 else 'Idle') }}
+
+      - name: "AECC Battery AC Charging Power"
+        unique_id: aecc_battery_ac_charging_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:power-plug
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'ac_charge_w') | int(0) }}"
+
+      - name: "AECC Battery PV Charging Power"
+        unique_id: aecc_battery_pv_charging_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-panel
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'pv_charge_w') | int(0) }}"
+
+      # AC + PV charging together (source for the Energy Charged counter)
+      - name: "AECC Battery Charging Power"
+        unique_id: aecc_battery_charging_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:battery-arrow-up
+        state: "{{ (state_attr('sensor.aecc_battery_energy','ac_charge_w') | int(0)) + (state_attr('sensor.aecc_battery_energy','pv_charge_w') | int(0)) }}"
+
+      - name: "AECC Battery Battery Discharging Power"
+        unique_id: aecc_battery_battery_discharging_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:battery-arrow-down
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'discharge_w') | int(0) }}"
+
+      - name: "AECC Battery PV Power"
+        unique_id: aecc_battery_pv_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-power
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'pv_w') | int(0) }}"
+
+      - name: "AECC Battery PV String 1 Power"
+        unique_id: aecc_battery_pv1_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-panel
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'pv1_w') | int(0) }}"
+
+      - name: "AECC Battery PV String 2 Power"
+        unique_id: aecc_battery_pv2_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:solar-panel
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'pv2_w') | int(0) }}"
+
+      - name: "AECC Battery Grid / Meter Power"
+        unique_id: aecc_battery_grid_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:transmission-tower
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'grid_w') | int(0) }}"
+
+      - name: "AECC Battery Grid Export Power"
+        unique_id: aecc_battery_grid_export_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:transmission-tower-export
+        state: "{{ [0, 0 - (state_attr('sensor.aecc_battery_energy', 'grid_w') | int(0))] | max }}"
+
+      - name: "AECC Battery Backup Power"
+        unique_id: aecc_battery_backup_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:power-plug-battery
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'backup_w') | int(0) }}"
+
+      # --- Modbus lifetime counters (DC side, behind the inverter) ---
+      - name: "AECC Battery Lifetime Energy Charged"
+        unique_id: aecc_battery_lifetime_energy_charged
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:battery-arrow-up
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','energy_charged_kwh') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','energy_charged_kwh') }}"
+
+      - name: "AECC Battery Lifetime Energy Discharged"
+        unique_id: aecc_battery_lifetime_energy_discharged
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:battery-arrow-down
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','energy_discharged_kwh') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','energy_discharged_kwh') }}"
+
+      - name: "AECC Battery Lifetime Energy To Grid"
+        unique_id: aecc_battery_lifetime_energy_to_grid
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:transmission-tower-export
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','energy_to_grid_kwh') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','energy_to_grid_kwh') }}"
+
+      - name: "AECC Battery Temperature 1"
+        unique_id: aecc_battery_temperature_1
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','temperature_1') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','temperature_1') }}"
+      - name: "AECC Battery Temperature 2"
+        unique_id: aecc_battery_temperature_2
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','temperature_2') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','temperature_2') }}"
+      - name: "AECC Battery Temperature 3"
+        unique_id: aecc_battery_temperature_3
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','temperature_3') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','temperature_3') }}"
+
+      - name: "AECC Battery Available Charge Power"
+        unique_id: aecc_battery_available_charge_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','available_charge_power_w') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','available_charge_power_w') }}"
+
+      - name: "AECC Battery Nominal Power"
+        unique_id: aecc_battery_nominal_power
+        unit_of_measurement: W
+        device_class: power
+        icon: mdi:flash-outline
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','nominal_power_w') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','nominal_power_w') }}"
+
+      - name: "AECC Battery Nominal Battery Power"
+        unique_id: aecc_battery_nominal_battery_power
+        unit_of_measurement: W
+        device_class: power
+        icon: mdi:battery-heart-variant
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','nominal_battery_power_w') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','nominal_battery_power_w') }}"
+
+      - name: "AECC Battery Alarm Flags"
+        unique_id: aecc_battery_alarm_flags
+        icon: mdi:alert-outline
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','alarm_flags') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','alarm_flags') }}"
+
+      - name: "AECC Battery Device Status"
+        unique_id: aecc_battery_device_status
+        icon: mdi:alert-circle-check-outline
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','device_status') is number }}"
+        state: "{{ 'Fault' if state_attr('sensor.aecc_battery_modbus','device_status') | int(0) == 1 else 'Normal' }}"
+
+      # --- Round-trip efficiency ---
+      # DC side, from the battery's own lifetime counters (no standby losses; compare with other systems)
+      - name: "AECC Battery Lifetime Energy RTE"
+        unique_id: aecc_battery_lifetime_energy_rte
+        icon: mdi:chart-bar
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set c = state_attr('sensor.aecc_battery_modbus','energy_charged_kwh') %}
+          {% set d = state_attr('sensor.aecc_battery_modbus','energy_discharged_kwh') %}
+          {% if c is number and d is number and c > 0 %}{{ ((d / c) * 100) | round(2) }}{% else %}unknown{% endif %}
+
+      # AC side, from the integrated (Riemann) counters below (includes standby losses)
+      - name: "AECC Battery Energy RTE AC"
+        unique_id: aecc_battery_energy_rte_ac
+        icon: mdi:chart-bar
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set c = states('sensor.aecc_battery_energy_charged') | float(0) %}
+          {% set d = states('sensor.aecc_battery_energy_discharged') | float(0) %}
+          {% if c > 0 %}{{ ((d / c) * 100) | round(2) }}{% else %}unknown{% endif %}
+
+      - name: "AECC Battery Firmware Version"
+        unique_id: aecc_battery_firmware_version
+        icon: mdi:chip
+        state: "{{ state_attr('sensor.aecc_battery_device','firmware') or 'unknown' }}"
+
+      - name: "AECC Battery WiFi Signal"
+        unique_id: aecc_battery_wifi_signal
+        unit_of_measurement: dBm
+        device_class: signal_strength
+        state_class: measurement
+        icon: mdi:wifi
+        availability: "{{ state_attr('sensor.aecc_battery_device','wifi_rssi') | is_number }}"
+        state: "{{ state_attr('sensor.aecc_battery_device','wifi_rssi') | float(0) | round(0) | int }}"
+
+  - binary_sensor:
+      - name: "AECC Battery Connection"
+        unique_id: aecc_battery_connection
+        device_class: connectivity
+        icon: mdi:lan-connect
+        state: "{{ state_attr('sensor.aecc_battery_energy','link_ok') | default(false) }}"
+        attributes:
+          last_ok: "{{ state_attr('sensor.aecc_battery_energy','last_ok') }}"
+          last_error: "{{ state_attr('sensor.aecc_battery_energy','last_error') }}"
+
+      - name: "AECC Battery Fault"
+        unique_id: aecc_battery_fault
+        device_class: problem
+        availability: "{{ state_attr('sensor.aecc_battery_modbus','device_status') is number }}"
+        state: "{{ state_attr('sensor.aecc_battery_modbus','device_status') | int(0) == 1 }}"
+
+  - number:
+      # Signed one-write control, like the integration: + charge, - discharge, 0 idle.
+      # State is read back from register 3003. Note: HBC overrides this via the automation.
+      - name: "AECC Battery Power Setpoint"
+        unique_id: aecc_battery_power_setpoint
+        icon: mdi:battery-charging-medium
+        unit_of_measurement: W
+        min: "{{ 0 - (states('input_number.aecc_battery_max_discharge_power') | int(800)) }}"
+        max: "{{ states('input_number.aecc_battery_max_charge_power') | int(800) }}"
+        step: 1
+        state: "{{ state_attr('sensor.aecc_battery_control_registers','power_setpoint_w') | int(0) }}"
+        set_value:
+          - action: script.aecc_battery_write_setpoint
+            data:
+              power: "{{ value | int }}"
+
+      - name: "AECC Battery Discharge Limit"
+        unique_id: aecc_battery_discharge_limit
+        icon: mdi:battery-low
+        unit_of_measurement: "%"
+        min: 5
+        max: 50
+        step: 1
+        state: "{{ state_attr('sensor.aecc_battery_control_registers','min_soc_3023') | int(states('input_number.aecc_battery_discharge_stop_soc') | int(10)) }}"
+        set_value:
+          - action: input_number.set_value
+            target: {entity_id: input_number.aecc_battery_discharge_stop_soc}
+            data: {value: "{{ value }}"}
+          - action: shell_command.aecc_set_registers
+            data:
+              registers: '{{ {"3023": (value | int) | string} | to_json }}'
+          - event: aecc_battery_refresh_registers
+
+      - name: "AECC Battery Charge Limit"
+        unique_id: aecc_battery_charge_limit
+        icon: mdi:battery-charging-high
+        unit_of_measurement: "%"
+        min: 50
+        max: 100
+        step: 1
+        state: "{{ state_attr('sensor.aecc_battery_control_registers','max_soc_3024') | int(states('input_number.aecc_battery_charge_stop_soc') | int(98)) }}"
+        set_value:
+          - action: input_number.set_value
+            target: {entity_id: input_number.aecc_battery_charge_stop_soc}
+            data: {value: "{{ value }}"}
+          - action: shell_command.aecc_set_registers
+            data:
+              registers: '{{ {"3024": (value | int) | string} | to_json }}'
+          - event: aecc_battery_refresh_registers
+
+  - select:
+      - name: "AECC Battery Work Mode"
+        unique_id: aecc_battery_work_mode
+        icon: mdi:battery-sync
+        options: "{{ ['Self-Consumption (AI)', 'Custom / Manual'] }}"
+        state: "{{ state_attr('sensor.aecc_battery_control_registers','work_mode') or 'Custom / Manual' }}"
+        select_option:
+          - action: shell_command.aecc_set_registers
+            data:
+              registers: >-
+                {% if option == 'Custom / Manual' %}
+                  {{ {"3000":"1","3020":"6","3021":"0","3022":"0","3030":"1"} | to_json }}
+                {% else %}
+                  {{ {"3000":"1","3020":"3","3021":"1","3022":"1","3030":"0","3003":"0,00:00,00:00,0,0,0,0,0,0,100,10"} | to_json }}
+                {% endif %}
+          - event: aecc_battery_refresh_registers
+
+  # -------------------------------------------------------------------------------------
+  # D2. MARSTEK M1 CONTRACT (what HBC reads and writes)
+  # -------------------------------------------------------------------------------------
+  - sensor:
+      - name: "Marstek M1 Device Name"
+        default_entity_id: sensor.marstek_m1_device_name
+        unique_id: marstek_m1_device_name
+        icon: mdi:rename-box
+        state: "{{ state_attr('sensor.aecc_battery_device','model') or 'Voltdeer SR5000 Pro' }}"
+
+      - name: "Marstek M1 Battery State Of Charge"
+        default_entity_id: sensor.marstek_m1_battery_state_of_charge
+        unique_id: marstek_m1_battery_state_of_charge
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        state: >
+          {% set v = states('sensor.aecc_battery_energy') %}
+          {{ v | float(0) | round(0) | int if v not in ['unknown','unavailable',''] else 0 }}
+
+      - name: "Marstek M1 Battery Voltage"
+        default_entity_id: sensor.marstek_m1_battery_voltage
+        unique_id: marstek_m1_battery_voltage
+        unit_of_measurement: V
+        device_class: voltage
+        state_class: measurement
+        state: "{{ states('input_number.aecc_battery_nominal_voltage') | float(0) }}"
+
+      - name: "Marstek M1 Battery Total Energy"
+        default_entity_id: sensor.marstek_m1_battery_total_energy
+        unique_id: marstek_m1_battery_total_energy
+        unit_of_measurement: kWh
+        device_class: energy_storage
+        state_class: measurement
+        state: "{{ states('input_number.aecc_battery_capacity_kwh') | float(0) | round(2) }}"
+
+      # Battery Power: + charging / - discharging
+      - name: "Marstek M1 Battery Power"
+        default_entity_id: sensor.marstek_m1_battery_power
+        unique_id: marstek_m1_battery_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: "{{ state_attr('sensor.aecc_battery_energy', 'battery_power_w') | int(0) }}"
+
+      # AC Power: + delivering to the house / - taking from the house
+      - name: "Marstek M1 AC Power"
+        default_entity_id: sensor.marstek_m1_ac_power
+        unique_id: marstek_m1_ac_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: "{{ 0 - (state_attr('sensor.aecc_battery_energy', 'battery_power_w') | int(0)) }}"
+
+      # 1=Standby (-5..10 W dead band), 2=Charge, 3=Discharge, 4=Fault (battery unreachable)
+      - name: "Marstek M1 Inverter State Number"
+        default_entity_id: sensor.marstek_m1_inverter_state_number
+        unique_id: marstek_m1_inverter_state_number
+        icon: mdi:state-machine
+        state: >
+          {% if states('sensor.aecc_battery_energy') in ['unknown','unavailable',''] %} 4
+          {% else %}
+            {% set p = state_attr('sensor.aecc_battery_energy', 'battery_power_w') | float(0) %}
+            {% if p > 10 %} 2 {% elif p < -5 %} 3 {% else %} 1 {% endif %}
+          {% endif %}
+
+      - name: "Marstek M1 Inverter State"
+        default_entity_id: sensor.marstek_m1_inverter_state
+        unique_id: marstek_m1_inverter_state
+        icon: mdi:state-machine
+        state: >
+          {% set raw = states('sensor.marstek_m1_inverter_state_number') %}
+          {% set mapping = {0:'Sleep',1:'Standby',2:'Charge',3:'Discharge',4:'Fault',5:'Idle',6:'AC bypass'} %}
+          {% if raw not in ['unknown','unavailable',''] %}{{ mapping.get(raw | int, 'Unknown state') }}{% else %}unknown{% endif %}
+
+      - name: "Marstek M1 Battery Remaining Capacity"
+        default_entity_id: sensor.marstek_m1_battery_remaining_capacity
+        unique_id: marstek_m1_battery_remaining_capacity
+        icon: mdi:battery-arrow-down-outline
+        unit_of_measurement: kWh
+        device_class: energy_storage
+        state_class: measurement
+        state: >
+          {% set soc = states('sensor.marstek_m1_battery_state_of_charge') | float(0) %}
+          {% set cap = states('input_number.aecc_battery_capacity_kwh') | float(0) %}
+          {{ (soc * cap / 100) | round(2) }}
+
+  - number:
+      - name: "Marstek M1 Max Charge Power"
+        default_entity_id: number.marstek_m1_max_charge_power
+        unique_id: marstek_m1_max_charge_power
+        unit_of_measurement: W
+        icon: mdi:battery-arrow-up
+        min: 100
+        max: 2400
+        step: 100
+        state: "{{ states('input_number.aecc_battery_max_charge_power') | int(800) }}"
+        set_value:
+          - action: input_number.set_value
+            target: {entity_id: input_number.aecc_battery_max_charge_power}
+            data: {value: "{{ value }}"}
+
+      - name: "Marstek M1 Max Discharge Power"
+        default_entity_id: number.marstek_m1_max_discharge_power
+        unique_id: marstek_m1_max_discharge_power
+        unit_of_measurement: W
+        icon: mdi:battery-arrow-down
+        min: 100
+        max: 2400
+        step: 100
+        state: "{{ states('input_number.aecc_battery_max_discharge_power') | int(800) }}"
+        set_value:
+          - action: input_number.set_value
+            target: {entity_id: input_number.aecc_battery_max_discharge_power}
+            data: {value: "{{ value }}"}
+
+      - name: "Marstek M1 Forcible Charge Power"
+        default_entity_id: number.marstek_m1_forcible_charge_power
+        unique_id: marstek_m1_forcible_charge_power
+        icon: mdi:tune-variant
+        unit_of_measurement: W
+        min: 0
+        max: 2400
+        step: 1
+        state: "{{ states('input_number.marstek_m1_forcible_charge_power_helper') }}"
+        set_value:
+          - action: input_number.set_value
+            target: {entity_id: input_number.marstek_m1_forcible_charge_power_helper}
+            data: {value: "{{ value }}"}
+
+      - name: "Marstek M1 Forcible Discharge Power"
+        default_entity_id: number.marstek_m1_forcible_discharge_power
+        unique_id: marstek_m1_forcible_discharge_power
+        icon: mdi:tune-variant
+        unit_of_measurement: W
+        min: 0
+        max: 2400
+        step: 1
+        state: "{{ states('input_number.marstek_m1_forcible_discharge_power_helper') }}"
+        set_value:
+          - action: input_number.set_value
+            target: {entity_id: input_number.marstek_m1_forcible_discharge_power_helper}
+            data: {value: "{{ value }}"}
+
+      # Charge To SOC = battery charge-stop SOC (register 3024)
+      - name: "Marstek M1 Charge To SOC"
+        default_entity_id: number.marstek_m1_charge_to_soc
+        unique_id: marstek_m1_charge_to_soc
+        unit_of_measurement: "%"
+        min: 50
+        max: 100
+        step: 1
+        state: "{{ states('input_number.aecc_battery_charge_stop_soc') }}"
+        set_value:
+          - action: number.set_value
+            target: {entity_id: number.aecc_battery_charge_limit}
+            data: {value: "{{ value }}"}
+
+  - select:
+      - name: "Marstek M1 RS485 Control Mode"
+        default_entity_id: select.marstek_m1_rs485_control_mode
+        unique_id: marstek_m1_rs485_control_mode
+        icon: mdi:connection
+        options: "{{ ['disable', 'enable'] }}"
+        state: "{{ states('input_select.marstek_m1_rs485_control_mode_helper') }}"
+        select_option:
+          - action: input_select.select_option
+            target: {entity_id: input_select.marstek_m1_rs485_control_mode_helper}
+            data: {option: "{{ option }}"}
+
+      # manual <-> Custom / Manual ; anti-feed / ai <-> Self-Consumption (AI). State read back from the battery.
+      - name: "Marstek M1 User Work Mode"
+        default_entity_id: select.marstek_m1_user_work_mode
+        unique_id: marstek_m1_user_work_mode
+        icon: mdi:auto-mode
+        options: "{{ ['manual', 'anti-feed', 'ai'] }}"
+        state: "{{ 'anti-feed' if states('select.aecc_battery_work_mode') == 'Self-Consumption (AI)' else 'manual' }}"
+        select_option:
+          - action: select.select_option
+            target: {entity_id: select.aecc_battery_work_mode}
+            data:
+              option: "{{ 'Custom / Manual' if option == 'manual' else 'Self-Consumption (AI)' }}"
+
+      - name: "Marstek M1 Forcible Charge/Discharge"
+        default_entity_id: select.marstek_m1_forcible_charge_discharge
+        unique_id: marstek_m1_forcible_charge_discharge
+        icon: mdi:arrow-up-down
+        options: "{{ ['stop', 'charge', 'discharge'] }}"
+        state: "{{ states('input_select.marstek_m1_forcible_charge_discharge_helper') }}"
+        select_option:
+          - action: input_select.select_option
+            target: {entity_id: input_select.marstek_m1_forcible_charge_discharge_helper}
+            data: {option: "{{ option }}"}
+
+# ---------------------------------------------------------------------------------------
+# D3. ENERGY COUNTERS (AC side, integrated from power like the integration) + daily meters
+# ---------------------------------------------------------------------------------------
+sensor:
+  - platform: integration
+    name: "AECC Battery Energy Charged"
+    unique_id: aecc_battery_energy_charged
+    source: sensor.aecc_battery_charging_power
+    method: left
+    unit_prefix: k
+    unit_time: h
+    round: 3
+    max_sub_interval: {minutes: 1}
+  - platform: integration
+    name: "AECC Battery Energy Discharged"
+    unique_id: aecc_battery_energy_discharged
+    source: sensor.aecc_battery_battery_discharging_power
+    method: left
+    unit_prefix: k
+    unit_time: h
+    round: 3
+    max_sub_interval: {minutes: 1}
+  - platform: integration
+    name: "AECC Battery Energy Generated"
+    unique_id: aecc_battery_energy_generated
+    source: sensor.aecc_battery_pv_power
+    method: left
+    unit_prefix: k
+    unit_time: h
+    round: 3
+    max_sub_interval: {minutes: 1}
+
+utility_meter:
+  aecc_battery_energy_charged_today:
+    name: "Energy charged today"
+    source: sensor.aecc_battery_energy_charged
+    cycle: daily
+  aecc_battery_energy_discharged_today:
+    name: "Energy discharged today"
+    source: sensor.aecc_battery_energy_discharged
+    cycle: daily
+  aecc_battery_lifetime_energy_charged_today:
+    name: "Lifetime energy charged today (DC)"
+    source: sensor.aecc_battery_lifetime_energy_charged
+    cycle: daily
+  aecc_battery_lifetime_energy_discharged_today:
+    name: "Lifetime energy discharged today (DC)"
+    source: sensor.aecc_battery_lifetime_energy_discharged
+    cycle: daily
+
+# ---------------------------------------------------------------------------------------
+# E. CONTROL
+# ---------------------------------------------------------------------------------------
+script:
+  # Write one signed setpoint (+W charge, -W discharge, 0 idle) with the integration's register set
+  aecc_battery_write_setpoint:
+    alias: "AECC Battery: write power setpoint"
+    mode: queued
+    fields:
+      power: {description: "Watts: + charge, - discharge, 0 idle", example: 500}
+    sequence:
+      - variables:
+          max_charge: "{{ states('input_number.aecc_battery_max_charge_power') | int(800) }}"
+          max_discharge: "{{ states('input_number.aecc_battery_max_discharge_power') | int(800) }}"
+          max_soc: "{{ states('input_number.aecc_battery_charge_stop_soc') | int(98) }}"
+          min_soc: "{{ states('input_number.aecc_battery_discharge_stop_soc') | int(10) }}"
+          f6: "{{ states('input_number.aecc_battery_slot_field6') | int(5) }}"
+          p: "{{ power | int(0) }}"
+          # clamp to the configured limits, then flip sign for register 3003 (negative = charge)
+          reg_power: >-
+            {% if p > 0 %}{{ 0 - ([p, max_charge] | min) }}
+            {%- elif p < 0 %}{{ [0 - p, max_discharge] | min }}
+            {%- else %}0{% endif %}
+          slot: >-
+            {% if reg_power | int == 0 %}0,00:00,00:00,0,0,0,0,0,0,{{ max_soc }},{{ min_soc }}
+            {%- else %}1,00:00,23:59,{{ reg_power }},0,6,{{ f6 }},0,0,{{ max_soc }},{{ min_soc }}
+            {%- endif %}
+          regs: >-
+            {% set r = {"3000":"1","3020":"6","3021":"0","3022":"0","3030":"1","3003": slot} %}
+            {% set feed = [max_charge, max_discharge] | max %}
+            {% if feed > 800 %}{% set r = dict(r, **{"3039": feed | string}) %}{% endif %}
+            {{ r | to_json }}
+      - action: shell_command.aecc_set_registers
+        data:
+          registers: "{{ regs }}"
+        response_variable: w
+        continue_on_error: true
+      - delay: {milliseconds: 700}
+      # Write-back verification (like the integration): re-read 3003 and compare with what was sent
+      - action: shell_command.aecc_get_registers
+        response_variable: v
+        continue_on_error: true
+      - variables:
+          write_ok: "{{ w is defined and w.returncode == 0 }}"
+          read_ok: "{{ v is defined and v.returncode == 0 }}"
+          actual_slot: "{{ ((v.stdout | from_json)['3003'] | default('?')) if read_ok else '?' }}"
+          verified: "{{ read_ok and (actual_slot == slot) }}"
+      - event: aecc_battery_refresh_registers
+      - if:
+          - condition: template
+            value_template: "{{ not write_ok or not verified }}"
+        then:
+          - action: system_log.write
+            data:
+              level: warning
+              logger: aecc_battery
+              message: >-
+                Setpoint write {{ 'FAILED' if not write_ok else 'NOT CONFIRMED' }}: sent 3003={{ slot }},
+                battery reports 3003={{ actual_slot }} ({{ (w.stderr | default('')) if w is defined else 'no response' }})
+          - action: persistent_notification.create
+            data:
+              notification_id: aecc_battery_write
+              title: "AECC battery: setpoint not confirmed"
+              message: >-
+                Requested {{ p }} W (register 3003 = {{ slot }}), battery reports {{ actual_slot }}.
+                {{ 'The write itself failed: ' ~ (w.stderr | default('')) if not write_ok else 'Check the AECC app / On Grid Output / slot field 6.' }}
+        else:
+          - action: persistent_notification.dismiss
+            data:
+              notification_id: aecc_battery_write
+
+  # Translate HBC's outputs (helpers) into one setpoint
+  aecc_battery_apply_hbc_control:
+    alias: "AECC Battery: apply HBC control (Marstek M1)"
+    mode: restart
+    sequence:
+      - delay: {milliseconds: 500}
+      - variables:
+          ctrl: "{{ states('input_select.marstek_m1_rs485_control_mode_helper') }}"
+          mode: "{{ states('input_select.marstek_m1_forcible_charge_discharge_helper') }}"
+          p_charge: "{{ states('input_number.marstek_m1_forcible_charge_power_helper') | int(0) }}"
+          p_discharge: "{{ states('input_number.marstek_m1_forcible_discharge_power_helper') | int(0) }}"
+          setpoint: >-
+            {% if ctrl == 'enable' and mode == 'charge' %}{{ p_charge }}
+            {%- elif ctrl == 'enable' and mode == 'discharge' %}{{ 0 - p_discharge }}
+            {%- else %}0{% endif %}
+      - action: script.aecc_battery_write_setpoint
+        data:
+          power: "{{ setpoint | int }}"
+
+automation:
+  - id: aecc_battery_hbc_control
+    alias: "AECC Battery: apply HBC control"
+    description: >-
+      Fires when HBC changes control mode, forcible charge/discharge or power on the
+      Marstek M1 entities and writes the resulting setpoint to the AECC battery.
+    mode: restart
+    triggers:
+      - trigger: state
+        entity_id:
+          - input_select.marstek_m1_rs485_control_mode_helper
+          - input_select.marstek_m1_forcible_charge_discharge_helper
+          - input_number.marstek_m1_forcible_charge_power_helper
+          - input_number.marstek_m1_forcible_discharge_power_helper
+    actions:
+      - action: script.aecc_battery_apply_hbc_control
+
+  # Re-apply the HBC setpoint after a HA restart
+  - id: aecc_battery_reapply_on_start
+    alias: "AECC Battery: re-apply HBC control after start"
+    triggers:
+      - trigger: homeassistant
+        event: start
+    actions:
+      - delay: {seconds: 60}
+      - action: script.aecc_battery_apply_hbc_control
