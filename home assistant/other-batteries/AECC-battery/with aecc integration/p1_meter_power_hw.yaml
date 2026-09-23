@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# sensor.p1_meter_power via REST (HomeWizard local API, polled every 6 seconds)
+#
+# Renaming the HomeWizard p1 meter integration entity (when already installed in home assistant)
+# ----------------------------------------------------------------------------------------------
+# Goal: the power entity of the HomeWizard P1 meter integration is renamed
+# from sensor.p1_meter_power to sensor.p1_meter_power_2, so the original ID
+# sensor.p1_meter_power is free for Home Battery Control in Node-RED.
+#
+# Steps:
+#   1. Settings -> Devices & services -> Entities.
+#   2. Search for sensor.p1_meter_power and check in the "Integration" column
+#      that it is the HomeWizard entity.
+#   3. Click the entity, then the gear icon (Settings) at the top right.
+#   4. Change the Entity ID to sensor.p1_meter_power_2.
+#   5. Click "Update". No restart needed; history and long-term statistics
+#      move along with the new ID.
+#
+# If another sensor already got sensor.p1_meter_power_2 automatically,
+# swap the IDs via a temporary name:
+#   1. HomeWizard entity -> sensor.p1_meter_power_tmp
+#   2. Other sensor      -> sensor.p1_meter_power
+#   3. HomeWizard entity -> sensor.p1_meter_power_2
+#
+# Check afterwards:
+#   - Automations, scripts, dashboards and the Energy dashboard are NOT
+#     updated automatically. Anything that should keep using the HomeWizard
+#     value must point to sensor.p1_meter_power_2.
+#   - Node-RED looks up entities by ID, so it reads whichever sensor holds
+#     sensor.p1_meter_power. If it still shows old values, redeploy the flow
+#     or restart the Home Assistant server connection in Node-RED.
+#   - Developer tools -> States: confirm sensor.p1_meter_power is the correct
+#     sensor and updates as expected.
+# ---------------------------------------------------------------------------
+
+rest:
+  - resource: "http://192.168.0.194/api/v1/data"
+    scan_interval: 6  #needs to be larger then 5 sec for correct aecc battery control in HBC
+    timeout: 2
+
+    sensor:
+      - name: "P1 meter power"
+        unique_id: p1_meter_power
+        value_template: "{{ value_json.active_power_w | float(0) }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
