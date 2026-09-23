@@ -85,13 +85,17 @@ HBC writes its decisions to the fake Marstek entities, which store them in helpe
 - The AECC app has an **On Grid Output** setting (factory default **800 W**) that caps inverter output and is **not** reachable over local TCP. Raise it in the app if you want to discharge above 800 W (only on a suitable dedicated circuit).
 - The AECC HA integration also needs to be configured separately to go above 800 W (a somewhat hidden option during installation; change it afterwards via *Configure*).
 
-## Update rate limit (P1 refresh ≥ 5 s)
+## HomeWizard P1 meter: poll every 6 s, not the default 5 s
 
-> **Warning:** the AECC battery hardware cannot process setpoint changes faster than about **once every 5 seconds**. Set the **P1 meter refresh / update interval in HBC to 5 s or slower**. With a faster P1 interval (e.g. 1 s) HBC's self-consumption PID sends new setpoints faster than the battery can apply them; the battery lags or ignores writes, the PID loop overshoots and the battery oscillates between charge and discharge.
+> **Note:** the HomeWizard P1 meter integration polls every **5 seconds** by default. That is right at the limit of the AECC battery and still causes missed or lagging setpoints in practice. Poll the P1 meter every **6 seconds** instead.
 
-- Configure the P1 update interval on the HBC dashboard / in the HBC config (`house_battery_control_config.yaml`) to **5 s** (or more).
-- Expect the battery to react roughly 5 s after each HBC decision; this is normal for this hardware.
-- The automation in this package already coalesces rapid HBC updates (500 ms, mode `restart`) and skips writes when the setpoint is unchanged, but it cannot make the battery respond faster than the hardware allows.
+The HomeWizard integration's 5 s interval cannot be changed in the UI, so the P1 value is read directly from the meter's local API with a REST sensor at `scan_interval: 6`. See [`p1_meter_power_hw.yaml`](p1_meter_power_hw.yaml):
+
+1. Enable the **Local API** of the HomeWizard P1 meter in the HomeWizard Energy app.
+2. Set the meter's IP address in `resource:` (e.g. `http://192.168.0.194/api/v1/data`).
+3. Rename the HomeWizard integration entity from `sensor.p1_meter_power` to `sensor.p1_meter_power_2`. The steps are in the comment block at the top of [`p1_meter_power_hw.yaml`](p1_meter_power_hw.yaml). This frees the ID `sensor.p1_meter_power` that HBC in Node-RED reads.
+4. Copy [`p1_meter_power_hw.yaml`](p1_meter_power_hw.yaml) into `/config/packages/`, then restart Home Assistant.
+5. Give the REST sensor the entity ID `sensor.p1_meter_power` (or point HBC's P1 sensor to the REST sensor), then check in Developer tools → States that it updates every 6 s.
 
 ## Safety
 
@@ -105,7 +109,7 @@ HBC writes its decisions to the fake Marstek entities, which store them in helpe
 - **HBC dashboard does not show the battery:** `sensor.marstek_m1_device_name` must not be `unknown`. Check that the template entities got the intended entity IDs (step 8 above).
 - **Entities exist but read 0 / unavailable:** verify the AECC integration entities (`sensor.aecc_battery_battery_soc`, `sensor.aecc_battery_battery_power`) update. If your device has a different friendly name, the `aecc_battery` prefix must be replaced.
 - **Setpoint is written but the battery does not follow:** check the *On Grid Output* cap in the AECC app and the max charge / discharge power in the integration.
-- **Battery oscillates between charge and discharge in Self-consumption:** the P1 refresh interval in HBC is probably faster than 5 s. Raise it to **5 s or more** (see [Update rate limit](#update-rate-limit-p1-refresh--5-s)) and, if needed, pick a slower PID preset.
+- **Battery oscillates between charge and discharge in Self-consumption:** the P1 meter is probably polled faster than the battery can follow. Poll it every **6 s** (see [HomeWizard P1 meter](#homewizard-p1-meter-poll-every-6-s-not-the-default-5-s)) and, if needed, pick a slower PID preset.
 - **Self-consumption enables control but never charges / discharges:** check the HBC PID gains (`Kp` / `Ki` / `Kd`). If all are `0`, HBC keeps forcible mode at `stop` @ `0 W`. Pick a PID preset on the HBC dashboard.
 - **Battery keeps falling back from Self-Consumption (AI) to Custom / Manual, logbook says "triggered by Supervisor":** the HBC master-switch flow in Node-RED (which reaches HA through the Supervisor proxy, hence the attribution) re-applies user work mode `manual` **every 5 minutes** while the HBC master mode is **Manual control**. Since v1.1 the package ignores `manual` unless HBC has control (RS485 control mode `enable`), so the battery keeps its own mode. If you want the battery to run its own AI, use HBC master mode **Marstek control**, which never writes the work mode. In **Full control** the battery is always in Custom / Manual because every setpoint write puts it there — that is by design.
 - **Battery stays in Custom / Manual after HBC releases control:** that is by design (setpoint 0). Set `RELEASE_TO_SELF_CONSUMPTION: true` in the automation to hand it back to *Self-Consumption (AI)*.
