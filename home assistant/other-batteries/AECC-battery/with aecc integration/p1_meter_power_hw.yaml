@@ -33,17 +33,55 @@
 #     or restart the Home Assistant server connection in Node-RED.
 #   - Developer tools -> States: confirm sensor.p1_meter_power is the correct
 #     sensor and updates as expected.
+#
+# Why two sensors (never "unavailable")
+# -------------------------------------
+# A REST sensor becomes "unavailable" when a poll fails (timeout, WiFi hiccup)
+# and right after a Home Assistant restart, until its first successful poll.
+# HBC then logs "Received invalid sensor state: unavailable ... expected a number".
+# Therefore:
+#   - sensor.p1_meter_power_raw : the REST sensor (may briefly be unavailable).
+#   - sensor.p1_meter_power     : template sensor read by HBC. It only takes
+#     numeric values from the raw sensor and keeps the last valid value
+#     during a failed poll. Its value is also restored after a restart.
+#
+# Upgrading from the previous version of this file (single REST sensor):
+#   1. Replace this file and restart Home Assistant.
+#   2. Settings -> Devices & services -> Entities: search "P1 meter power".
+#      Delete the old REST entity sensor.p1_meter_power (status
+#      "no longer provided" / read-only, integration "RESTful").
+#   3. Rename the new template sensor (probably sensor.p1_meter_power_3)
+#      to sensor.p1_meter_power.
 # ---------------------------------------------------------------------------
 
 rest:
   - resource: "http://192.168.0.194/api/v1/data"
-    scan_interval: 6  #needs to be larger then 5 sec for correct aecc battery control in HBC
-    timeout: 2
+    scan_interval: 6  # needs to be larger than 5 sec for correct aecc battery control in HBC
+    timeout: 5        # must stay below scan_interval
 
     sensor:
+      - name: "P1 meter power raw"
+        unique_id: p1_meter_power_raw
+        value_template: "{{ value_json.active_power_w }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+template:
+  - trigger:
+      - trigger: state
+        entity_id: sensor.p1_meter_power_raw
+        not_to:
+          - unavailable
+          - unknown
+    condition:
+      - condition: template
+        value_template: "{{ is_number(trigger.to_state.state) }}"
+    sensor:
       - name: "P1 meter power"
-        unique_id: p1_meter_power
-        value_template: "{{ value_json.active_power_w | float(0) }}"
+        unique_id: p1_meter_power_hold
+        default_entity_id: sensor.p1_meter_power
+        state: "{{ trigger.to_state.state | float }}"
         unit_of_measurement: "W"
         device_class: power
         state_class: measurement
