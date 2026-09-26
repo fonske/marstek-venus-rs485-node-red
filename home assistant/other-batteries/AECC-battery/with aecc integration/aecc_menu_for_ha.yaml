@@ -183,12 +183,10 @@ cards:
         name: Nominal Power
       - entity: sensor.aecc_battery_inverter_temperature
         name: Inverter Temperature
-      - entity: sensor.aecc_battery_temperature_1
-        name: Temperature 1
-      - entity: sensor.aecc_battery_temperature_2
-        name: Temperature 2
-      - entity: sensor.aecc_battery_temperature_3
-        name: Temperature 3
+      - entity: sensor.aecc_battery_pv_radiator_temperature
+        name: Radiator Temperature
+      - entity: sensor.aecc_battery_transformer_temperature
+        name: Transformer Temperature
       - entity: sensor.aecc_battery_wifi_signal
         name: WiFi Signal
 badges:
