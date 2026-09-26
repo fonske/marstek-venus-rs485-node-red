@@ -181,6 +181,8 @@ cards:
         name: Nominal Battery Power
       - entity: sensor.aecc_battery_nominal_power
         name: Nominal Power
+      - entity: sensor.aecc_battery_inverter_temperature
+        name: Inverter Temperature
       - entity: sensor.aecc_battery_temperature_1
         name: Temperature 1
       - entity: sensor.aecc_battery_temperature_2
