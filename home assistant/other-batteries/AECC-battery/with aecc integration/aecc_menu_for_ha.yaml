@@ -75,7 +75,7 @@ cards:
         name: Lifetime Energy Charged
       - entity: sensor.aecc_battery_lifetime_energy_discharged
         name: Lifetime Energy Discharged
-      - entity: sensor.lifetime_energy_rte
+      - entity: sensor.aecc_battery_lifetime_energy_rte
       - entity: sensor.aecc_battery_lifetime_energy_to_grid
         name: Lifetime Energy to Grid
       - entity: sensor.aecc_battery_pv_power
