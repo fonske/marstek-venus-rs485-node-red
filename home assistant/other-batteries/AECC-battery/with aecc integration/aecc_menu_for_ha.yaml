@@ -171,10 +171,6 @@ cards:
         name: HBC control mode (M1)
       - entity: select.marstek_m1_forcible_charge_discharge
         name: HBC forcible charge/discharge (M1)
-      - entity: number.marstek_m1_forcible_charge_power
-        name: HBC forcible charge power (M1)
-      - entity: number.marstek_m1_forcible_discharge_power
-        name: HBC forcible discharge power (M1)
   - type: entities
     entities:
       - entity: sensor.aecc_battery_alarm_flags
