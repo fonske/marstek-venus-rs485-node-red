@@ -87,7 +87,7 @@ HBC writes its decisions to the fake Marstek entities, which store them in helpe
 
 ## HomeWizard P1 meter: poll every 6 s, not the default 5 s
 
-> **Note:** the HomeWizard P1 meter integration polls every **5 seconds** by default. That is right at the limit of the AECC battery and still causes missed or lagging setpoints in practice. Poll the P1 meter every **6 seconds** instead.
+> **Note:** the HomeWizard P1 meter integration polls every **5 seconds** by default. That is right at the limit of the AECC battery and still causes missed or lagging setpoints in practice. Poll the P1 meter every **6 seconds** instead. EDIT!!!: with latest beta version V1.7.1 of aecc_battery_local, there is a fix for unavailable sensors with 5s interval. This note might be deleted after testing for a few days.
 
 The HomeWizard integration's 5 s interval cannot be changed in the UI, so the P1 value is read directly from the meter's local API with a REST sensor at `scan_interval: 6`. See [`p1_meter_power_hw.yaml`](p1_meter_power_hw.yaml):
 
