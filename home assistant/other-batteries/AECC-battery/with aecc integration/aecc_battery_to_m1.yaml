@@ -130,6 +130,7 @@ template:
         default_entity_id: sensor.marstek_m1_battery_state_of_charge
         unique_id: marstek_m1_battery_state_of_charge_aecc_battery
         unit_of_measurement: "%"
+        icon: mdi:power-plug-battery-outline
         device_class: battery
         state_class: measurement
         state: >
@@ -268,7 +269,7 @@ template:
         default_entity_id: number.marstek_m1_max_charge_power
         unique_id: marstek_m1_max_charge_power_aecc_battery
         unit_of_measurement: W
-        icon: mdi:battery-arrow-up
+        icon: mdi:tune-variant
         state: >
           {{ state_attr('number.aecc_battery_power_setpoint', 'max') | int(2500) }}
         min: 0
@@ -283,7 +284,7 @@ template:
         default_entity_id: number.marstek_m1_max_discharge_power
         unique_id: marstek_m1_max_discharge_power_aecc_battery
         unit_of_measurement: W
-        icon: mdi:battery-arrow-down
+        icon: mdi:tune-variant
         state: >
           {{ (0 - (state_attr('number.aecc_battery_power_setpoint', 'min') | int(-2500))) }}
         min: 0
